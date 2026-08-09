@@ -456,6 +456,197 @@ class TestPayloadFilters:
         assert captured[0].text == "Task: PAY BILLS"
         assert captured[0].raw_message["body"] == "PAY BILLS"
 
+    @pytest.mark.asyncio
+    async def test_script_receives_authenticated_webhook_metadata(self, tmp_path, monkeypatch):
+        """Route scripts can read adapter-authenticated event and delivery headers."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        scripts = tmp_path / "scripts"
+        scripts.mkdir()
+        script = scripts / "metadata_filter.py"
+        script.write_text(
+            "import json, sys\n"
+            "payload = json.load(sys.stdin)\n"
+            "meta = payload['__hermes']\n"
+            "payload['meta_event'] = meta['event_type']\n"
+            "payload['meta_delivery'] = meta['delivery_id']\n"
+            "print(json.dumps(payload))\n",
+            encoding="utf-8",
+        )
+        routes = {
+            "github": {
+                "secret": _INSECURE_NO_AUTH,
+                "script": "metadata_filter.py",
+                "prompt": "{meta_event}:{meta_delivery}:{action}",
+            }
+        }
+        adapter = _make_adapter(routes=routes)
+        captured = []
+
+        async def _capture(event):
+            captured.append(event)
+
+        adapter.handle_message = _capture
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/webhooks/github",
+                json={"action": "opened"},
+                headers={
+                    "X-GitHub-Event": "pull_request",
+                    "X-GitHub-Delivery": "delivery-auth-1",
+                },
+            )
+            assert resp.status == 202
+
+        await asyncio.sleep(0.05)
+        assert captured[0].text == "pull_request:delivery-auth-1:opened"
+        assert captured[0].raw_message["__hermes"] == {
+            "event_type": "pull_request",
+            "delivery_id": "delivery-auth-1",
+        }
+
+    @pytest.mark.asyncio
+    async def test_script_metadata_overwrites_spoofed_body_hermes(self, tmp_path, monkeypatch):
+        """A body-supplied __hermes object is replaced, never merged or trusted."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        scripts = tmp_path / "scripts"
+        scripts.mkdir()
+        script = scripts / "spoof_filter.py"
+        script.write_text(
+            "import json, sys\n"
+            "payload = json.load(sys.stdin)\n"
+            "payload['observed'] = payload['__hermes']\n"
+            "print(json.dumps(payload))\n",
+            encoding="utf-8",
+        )
+        routes = {
+            "github": {
+                "secret": _INSECURE_NO_AUTH,
+                "script": "spoof_filter.py",
+                "prompt": "{observed.event_type}:{observed.delivery_id}:{observed.attacker}",
+            }
+        }
+        adapter = _make_adapter(routes=routes)
+        captured = []
+
+        async def _capture(event):
+            captured.append(event)
+
+        adapter.handle_message = _capture
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/webhooks/github",
+                json={
+                    "action": "opened",
+                    "__hermes": {
+                        "event_type": "spoofed-event",
+                        "delivery_id": "spoofed-delivery",
+                        "attacker": "keep-me",
+                    },
+                },
+                headers={
+                    "X-GitHub-Event": "pull_request",
+                    "X-GitHub-Delivery": "delivery-auth-2",
+                },
+            )
+            assert resp.status == 202
+
+        await asyncio.sleep(0.05)
+        assert captured[0].text == "pull_request:delivery-auth-2:{observed.attacker}"
+        assert captured[0].raw_message["observed"] == {
+            "event_type": "pull_request",
+            "delivery_id": "delivery-auth-2",
+        }
+
+    @pytest.mark.asyncio
+    async def test_script_keeps_existing_raw_payload_fields(self, tmp_path, monkeypatch):
+        """Adding metadata for scripts does not wrap or remove original payload fields."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        scripts = tmp_path / "scripts"
+        scripts.mkdir()
+        script = scripts / "raw_payload_filter.py"
+        script.write_text(
+            "import json, sys\n"
+            "payload = json.load(sys.stdin)\n"
+            "payload['summary'] = payload['task']['content'].upper()\n"
+            "print(json.dumps(payload))\n",
+            encoding="utf-8",
+        )
+        routes = {
+            "todoist": {
+                "secret": _INSECURE_NO_AUTH,
+                "script": "raw_payload_filter.py",
+                "prompt": "Task: {summary}",
+            }
+        }
+        adapter = _make_adapter(routes=routes)
+        captured = []
+
+        async def _capture(event):
+            captured.append(event)
+
+        adapter.handle_message = _capture
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/webhooks/todoist",
+                json={"task": {"content": "pay bills"}},
+                headers={"X-GitHub-Delivery": "raw-payload-1"},
+            )
+            assert resp.status == 202
+
+        await asyncio.sleep(0.05)
+        assert captured[0].text == "Task: PAY BILLS"
+        assert captured[0].raw_message["task"] == {"content": "pay bills"}
+
+    @pytest.mark.asyncio
+    async def test_script_and_duplicate_handling_use_same_delivery_id(self, tmp_path, monkeypatch):
+        """The delivery ID exposed to scripts is the same ID used for duplicate detection."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        scripts = tmp_path / "scripts"
+        scripts.mkdir()
+        script = scripts / "delivery_filter.py"
+        script.write_text(
+            "import json, sys\n"
+            "payload = json.load(sys.stdin)\n"
+            "payload['script_delivery'] = payload['__hermes']['delivery_id']\n"
+            "print(json.dumps(payload))\n",
+            encoding="utf-8",
+        )
+        routes = {
+            "idem": {
+                "secret": _INSECURE_NO_AUTH,
+                "script": "delivery_filter.py",
+                "prompt": "delivery {script_delivery}",
+            }
+        }
+        adapter = _make_adapter(routes=routes)
+        captured = []
+
+        async def _capture(event):
+            captured.append(event)
+
+        adapter.handle_message = _capture
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            headers = {"X-GitHub-Delivery": "delivery-shared-1"}
+            resp1 = await cli.post("/webhooks/idem", json={"a": 1}, headers=headers)
+            assert resp1.status == 202
+
+            resp2 = await cli.post("/webhooks/idem", json={"a": 1}, headers=headers)
+            assert resp2.status == 200
+            data = await resp2.json()
+            assert data == {"status": "duplicate", "delivery_id": "delivery-shared-1"}
+
+        await asyncio.sleep(0.05)
+        assert len(captured) == 1
+        assert captured[0].text == "delivery delivery-shared-1"
+
 
 # ===================================================================
 # HTTP handling

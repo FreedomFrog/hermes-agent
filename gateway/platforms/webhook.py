@@ -732,13 +732,31 @@ class WebhookAdapter(BasePlatformAdapter):
                 }
             )
 
+        # Build a unique delivery ID before route scripts run so scripts can
+        # bind their output to adapter-authenticated request metadata. Reuse
+        # this exact value below for idempotency and session identity.
+        delivery_id = request.headers.get(
+            "X-GitHub-Delivery",
+            request.headers.get(
+                "svix-id",
+                request.headers.get("X-Request-ID", str(int(time.time() * 1000))),
+            ),
+        )
+
         if route_config.get("script"):
+            script_payload = {
+                **payload,
+                "__hermes": {
+                    "event_type": event_type,
+                    "delivery_id": delivery_id,
+                },
+            }
             # run_route_script shells out (subprocess.run, up to its timeout);
             # run it in a worker thread so it can't block the gateway event loop.
             keep, transformed_payload = await asyncio.to_thread(
                 self._route_processor.run_route_script,
                 route_config.get("script"),
-                payload,
+                script_payload,
             )
             if not keep:
                 logger.info(
@@ -789,15 +807,6 @@ class WebhookAdapter(BasePlatformAdapter):
                         )
             except Exception as e:
                 logger.warning("[webhook] Skill loading failed: %s", e)
-
-        # Build a unique delivery ID
-        delivery_id = request.headers.get(
-            "X-GitHub-Delivery",
-            request.headers.get(
-                "svix-id",
-                request.headers.get("X-Request-ID", str(int(time.time() * 1000))),
-            ),
-        )
 
         # ── Idempotency ─────────────────────────────────────────
         # Skip duplicate deliveries (webhook retries).
