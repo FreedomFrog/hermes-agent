@@ -74,7 +74,7 @@ Returns the webhook URL and HMAC secret. The user configures their service to PO
 Two mechanisms narrow broad event streams (e.g. Todoist/GitHub fire on every update) so only relevant payloads wake the agent:
 
 - **Declarative `filters`** (config.yaml routes only): list of conditions on payload fields, event type, or headers — operators `equals`, `not_equals`, `contains`, `exists`, `missing`, `in`, `in_file`, `regex`, with `all`/`any`/`not` grouping. Non-matching events are ignored with HTTP 200.
-- **Route scripts** (`--script` on subscribe, or `script:` on a config route): a script under `~/.hermes/scripts/` receives the payload as JSON on stdin. JSON stdout replaces the payload before prompt templating; empty stdout, `[SILENT]`, or a nonzero exit ignores the webhook. `.sh`/`.bash` run with bash, everything else with Python. Scripts cannot live outside `~/.hermes/scripts/` (path traversal is blocked).
+- **Route scripts** (`--script` on subscribe, or `script:` on a config route): a script under `~/.hermes/scripts/` receives the payload as JSON on stdin. Before the script runs, Hermes overwrites the reserved top-level `__hermes` object with adapter-derived `event_type` and `delivery_id` metadata; never trust a body-supplied `__hermes` value. A script may preserve, transform, or remove this object. JSON stdout replaces the payload before prompt templating; empty stdout, `[SILENT]`, or a nonzero exit ignores the webhook. `.sh`/`.bash` run with bash, everything else with Python. Scripts cannot live outside `~/.hermes/scripts/` (path traversal is blocked).
 
 ```bash
 hermes webhook subscribe todoist-hermes \

@@ -83,7 +83,7 @@ Routes define how different webhook sources are handled. Each route is a named e
 | `profile` | No | Profile authorized to execute this route when `gateway.multiplex_profiles` is enabled. Omit it for a default-profile-only route; set a profile name (for example `coder`) to bind the route and its secret to `/p/coder/webhooks/<route>`. |
 | `prompt` | No | Template string with dot-notation payload access (e.g. `{pull_request.title}`). If omitted, the full JSON payload is dumped into the prompt. Payload fields are untrusted — see [Authenticated does not mean trusted](#authenticated-does-not-mean-trusted). |
 | `filters` | No | Declarative payload filters evaluated after auth/body/event filtering and before agent or direct delivery work. Non-matches return `{"status":"ignored","reason":"filter"}` with HTTP 200. |
-| `script` | No | Filter/transform script under `~/.hermes/scripts/`. The webhook payload is passed as JSON on stdin. JSON object stdout replaces the payload before templating; text stdout is exposed as `script_output`; empty stdout, `[SILENT]`, or a nonzero exit code ignores the webhook. |
+| `script` | No | Filter/transform script under `~/.hermes/scripts/`. The webhook payload is passed as JSON on stdin with a reserved adapter-derived `__hermes` object containing `event_type` and `delivery_id`. JSON object stdout replaces the payload before templating; text stdout is exposed as `script_output`; empty stdout, `[SILENT]`, or a nonzero exit code ignores the webhook. |
 | `skills` | No | List of skill names to load for the agent run. |
 | `deliver` | No | Where to send the response: `github_comment`, `telegram`, `discord`, `slack`, `signal`, `sms`, `whatsapp`, `matrix`, `mattermost`, `homeassistant`, `email`, `dingtalk`, `feishu`, `wecom`, `weixin`, `bluebubbles`, `qqbot`, or `log` (default). |
 | `deliver_extra` | No | Additional delivery config — keys depend on `deliver` type (e.g. `repo`, `pr_number`, `chat_id`). Values support the same `{dot.notation}` templates as `prompt`. |
@@ -165,7 +165,18 @@ Field paths use dot notation. `payload.foo` reads from a top-level `payload` obj
 
 Use `script` when declarative filters are not enough. Scripts must live under `~/.hermes/scripts/` for the active profile; relative paths resolve there, and path traversal outside that directory is blocked. `.sh` and `.bash` scripts run with bash, and all other extensions run with the current Python interpreter.
 
-The route payload is sent to stdin as JSON:
+The route payload is sent to stdin as JSON. Before invoking the script, Hermes overwrites the reserved top-level `__hermes` object with metadata derived by the adapter:
+
+```json
+{
+  "__hermes": {
+    "event_type": "pull_request",
+    "delivery_id": "provider-delivery-id"
+  }
+}
+```
+
+For signed routes, these values are bound to the authenticated request rather than trusted from a body-supplied `__hermes` field. The script can read them for provenance and idempotency, preserve or transform them in JSON output, or explicitly remove them. If preserved, prompt templates can use `{__hermes.event_type}` and `{__hermes.delivery_id}`.
 
 ```python
 # ~/.hermes/scripts/todoist-hermes-label.py
