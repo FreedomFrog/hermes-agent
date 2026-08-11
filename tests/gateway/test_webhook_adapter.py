@@ -507,6 +507,141 @@ class TestPayloadFilters:
         }
 
     @pytest.mark.asyncio
+    async def test_script_metadata_is_available_to_prompt_template(self, tmp_path, monkeypatch):
+        """Preserved adapter metadata supports direct dot-notation prompt templates."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        scripts = tmp_path / "scripts"
+        scripts.mkdir()
+        script = scripts / "preserve_metadata.py"
+        script.write_text(
+            "import json, sys\n"
+            "print(json.dumps(json.load(sys.stdin)))\n",
+            encoding="utf-8",
+        )
+        routes = {
+            "github": {
+                "secret": _INSECURE_NO_AUTH,
+                "script": "preserve_metadata.py",
+                "prompt": "{__hermes.event_type}:{__hermes.delivery_id}",
+            }
+        }
+        adapter = _make_adapter(routes=routes)
+        captured = []
+
+        async def _capture(event):
+            captured.append(event)
+
+        adapter.handle_message = _capture
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/webhooks/github",
+                json={"action": "opened"},
+                headers={
+                    "X-GitHub-Event": "pull_request",
+                    "X-GitHub-Delivery": "delivery-template-1",
+                },
+            )
+            assert resp.status == 202
+
+        await asyncio.sleep(0.05)
+        assert captured[0].text == "pull_request:delivery-template-1"
+
+    @pytest.mark.asyncio
+    async def test_script_can_remove_adapter_metadata(self, tmp_path, monkeypatch):
+        """A transform may deliberately omit reserved metadata from its output."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        scripts = tmp_path / "scripts"
+        scripts.mkdir()
+        script = scripts / "remove_metadata.py"
+        script.write_text(
+            "import json, sys\n"
+            "payload = json.load(sys.stdin)\n"
+            "payload.pop('__hermes')\n"
+            "print(json.dumps(payload))\n",
+            encoding="utf-8",
+        )
+        routes = {
+            "github": {
+                "secret": _INSECURE_NO_AUTH,
+                "script": "remove_metadata.py",
+                "prompt": "{action}:{__hermes.delivery_id}",
+            }
+        }
+        adapter = _make_adapter(routes=routes)
+        captured = []
+
+        async def _capture(event):
+            captured.append(event)
+
+        adapter.handle_message = _capture
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/webhooks/github",
+                json={"action": "opened"},
+                headers={
+                    "X-GitHub-Event": "pull_request",
+                    "X-GitHub-Delivery": "delivery-removed-1",
+                },
+            )
+            assert resp.status == 202
+
+        await asyncio.sleep(0.05)
+        assert captured[0].text == "opened:{__hermes.delivery_id}"
+        assert "__hermes" not in captured[0].raw_message
+
+    @pytest.mark.asyncio
+    async def test_ignored_script_receives_adapter_metadata(self, tmp_path, monkeypatch):
+        """Metadata is present even when a script intentionally ignores delivery."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        scripts = tmp_path / "scripts"
+        scripts.mkdir()
+        observed = tmp_path / "observed-metadata.json"
+        script = scripts / "ignore_with_metadata.py"
+        script.write_text(
+            "import json, pathlib, sys\n"
+            "payload = json.load(sys.stdin)\n"
+            f"pathlib.Path({str(observed)!r}).write_text(json.dumps(payload['__hermes']))\n"
+            "print('[SILENT]')\n",
+            encoding="utf-8",
+        )
+        routes = {
+            "github": {
+                "secret": _INSECURE_NO_AUTH,
+                "script": "ignore_with_metadata.py",
+                "prompt": "must not run",
+            }
+        }
+        adapter = _make_adapter(routes=routes)
+        adapter.handle_message = AsyncMock()
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/webhooks/github",
+                json={"action": "edited"},
+                headers={
+                    "X-GitHub-Event": "pull_request",
+                    "X-GitHub-Delivery": "delivery-ignored-1",
+                },
+            )
+            assert resp.status == 200
+            assert await resp.json() == {
+                "status": "ignored",
+                "reason": "script",
+                "route": "github",
+            }
+
+        assert json.loads(observed.read_text(encoding="utf-8")) == {
+            "event_type": "pull_request",
+            "delivery_id": "delivery-ignored-1",
+        }
+        adapter.handle_message.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_script_metadata_overwrites_spoofed_body_hermes(self, tmp_path, monkeypatch):
         """A body-supplied __hermes object is replaced, never merged or trusted."""
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
